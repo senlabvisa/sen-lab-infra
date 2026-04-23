@@ -1,0 +1,50 @@
+name: Reusable Node CI
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Path to the service root (contains package.json)
+        required: false
+        type: string
+        default: .
+      node-version:
+        required: false
+        type: string
+        default: "20"
+      pnpm-version:
+        required: false
+        type: string
+        default: "9"
+      run-test:
+        required: false
+        type: boolean
+        default: true
+      run-build:
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+          cache-dependency-path: ${{ inputs.working-directory }}/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+        if: hashFiles(format('{0}/.eslintrc*', inputs.working-directory), format('{0}/eslint.config.*', inputs.working-directory)) != ''
+      - if: ${{ inputs.run-test }}
+        run: pnpm test
+      - if: ${{ inputs.run-build }}
+        run: pnpm build
