@@ -61,6 +61,73 @@ case "$cmd" in
   up|"")
     echo "Lancement de Sen Lab Visa..."
     $COMPOSE up -d --build
+
+    # ---- Auto-soin de la BDD ----------------------------------------
+    # Le seed initial peut echouer silencieusement (race condition entre
+    # users-service et schools-service au boot). Ce bloc verifie l'etat
+    # final et relance le seed automatiquement si necessaire.
+
+    echo ""
+    echo "[auto-check] Attente du demarrage complet des services..."
+
+    # 1. Attente postgres healthy
+    waited=0
+    until docker exec senlab-postgres pg_isready -U "${POSTGRES_USER:-senlab}" -d "${POSTGRES_DB:-senlab}" >/dev/null 2>&1; do
+      [ $waited -ge 60 ] && { echo "[auto-check] postgres pas pret apres 60s, abandon."; break; }
+      sleep 2; waited=$((waited+2))
+    done
+
+    # 2. Attente que les tables critiques soient creees par les services Prisma
+    #    On surveille public.users (users-service) et schools_svc.schools (schools-service)
+    #    car le seed users-service a besoin des deux.
+    waited=0
+    max_wait=180
+    while [ $waited -lt $max_wait ]; do
+      users_ok=$(docker exec senlab-postgres psql -U "${POSTGRES_USER:-senlab}" -d "${POSTGRES_DB:-senlab}" \
+        -tAc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='users' LIMIT 1;" 2>/dev/null | tr -d ' \r')
+      schools_ok=$(docker exec senlab-postgres psql -U "${POSTGRES_USER:-senlab}" -d "${POSTGRES_DB:-senlab}" \
+        -tAc "SELECT 1 FROM information_schema.tables WHERE table_schema='schools_svc' AND table_name='schools' LIMIT 1;" 2>/dev/null | tr -d ' \r')
+
+      if [ "$users_ok" = "1" ] && [ "$schools_ok" = "1" ]; then
+        echo "[auto-check] Tables prisma creees ($((waited))s)."
+        break
+      fi
+      [ $((waited % 15)) -eq 0 ] && echo "[auto-check] Attente prisma db push... users=$users_ok schools=$schools_ok ($((waited))s)"
+      sleep 3; waited=$((waited+3))
+    done
+
+    if [ "$users_ok" != "1" ] || [ "$schools_ok" != "1" ]; then
+      echo "[auto-check] Tables non creees apres ${max_wait}s. Verifie : ./up.sh logs"
+    else
+      # 3. Laisse le seed initial finir, puis verifie le nombre de comptes
+      sleep 4
+      user_count=$(docker exec senlab-postgres psql -U "${POSTGRES_USER:-senlab}" -d "${POSTGRES_DB:-senlab}" \
+        -tAc "SELECT COUNT(*) FROM public.users;" 2>/dev/null | tr -d ' \r')
+
+      if [ "${user_count:-0}" -eq 0 ] 2>/dev/null; then
+        echo "[auto-check] BDD vide detectee, relance automatique du seed..."
+
+        TSNODE_OPTS='TS_NODE_TRANSPILE_ONLY=true TS_NODE_COMPILER_OPTIONS={\"module\":\"commonjs\",\"moduleResolution\":\"node\",\"target\":\"ES2022\",\"esModuleInterop\":true,\"resolveJsonModule\":true}'
+
+        docker exec senlab-users sh -c \
+          "$TSNODE_OPTS npx --no-install ts-node prisma/seed.ts" 2>&1 \
+          | sed 's/^/  [users] /' || true
+
+        docker exec senlab-simulations sh -c \
+          "$TSNODE_OPTS npx --no-install ts-node prisma/seed.ts" 2>&1 \
+          | sed 's/^/  [sims]  /' || true
+
+        user_count=$(docker exec senlab-postgres psql -U "${POSTGRES_USER:-senlab}" -d "${POSTGRES_DB:-senlab}" \
+          -tAc "SELECT COUNT(*) FROM public.users;" 2>/dev/null | tr -d ' \r')
+      fi
+
+      if [ "${user_count:-0}" -gt 0 ] 2>/dev/null; then
+        echo "[auto-check] BDD prete : $user_count comptes en place."
+      else
+        echo "[auto-check] Probleme avec le seed. Verifie : ./up.sh logs users-service"
+      fi
+    fi
+
     echo ""
     echo "Tout est lance."
     echo "  Web      -> http://localhost:13050"
