@@ -23,6 +23,8 @@
 #   ./up.sh nuke        arrete + supprime conteneurs + volumes (perte BDD)
 #   ./up.sh status      liste les conteneurs et leur etat
 #   ./up.sh rebuild <svc>  rebuild un service precis (ex: ./up.sh rebuild web)
+#   ./up.sh seed        relance le seed BDD (utile si la base est vide apres clonage)
+#   ./up.sh users       liste les comptes presents dans la BDD
 #
 # Pre-requis : Docker Desktop lance, ports libres (5432, 3010, 13050, 8080).
 # =====================================================================
@@ -105,6 +107,32 @@ case "$cmd" in
     svc="${2:?Indique le service a rebuilder (ex: ./up.sh rebuild web)}"
     echo "Rebuild $svc..."
     $COMPOSE up -d --build --no-deps "$svc"
+    ;;
+
+  seed)
+    echo "Re-execution du seed users-service + simulations-service..."
+    if ! docker ps --format '{{.Names}}' | grep -q '^senlab-users$'; then
+      echo "Erreur : senlab-users n'est pas demarre. Lance d'abord : ./up.sh"
+      exit 1
+    fi
+    TSNODE_OPTS='TS_NODE_TRANSPILE_ONLY=true TS_NODE_COMPILER_OPTIONS={\"module\":\"commonjs\",\"moduleResolution\":\"node\",\"target\":\"ES2022\",\"esModuleInterop\":true,\"resolveJsonModule\":true}'
+    docker exec senlab-users sh -c \
+      "$TSNODE_OPTS npx --no-install ts-node prisma/seed.ts" \
+      || echo "(seed users-service termine avec warnings)"
+    docker exec senlab-simulations sh -c \
+      "$TSNODE_OPTS npx --no-install ts-node prisma/seed.ts" \
+      || echo "(seed simulations-service termine avec warnings)"
+    echo ""
+    echo "Verification : comptes presents en BDD"
+    docker exec senlab-postgres psql -U "${POSTGRES_USER:-senlab}" -d "${POSTGRES_DB:-senlab}" \
+      -c "SELECT identifier, role FROM public.users ORDER BY role, identifier;" 2>&1 \
+      | head -20
+    ;;
+
+  users)
+    echo "Comptes presents dans la BDD :"
+    docker exec senlab-postgres psql -U "${POSTGRES_USER:-senlab}" -d "${POSTGRES_DB:-senlab}" \
+      -c "SELECT identifier, role, \"fullName\" FROM public.users ORDER BY role, identifier;" 2>&1
     ;;
 
   *)

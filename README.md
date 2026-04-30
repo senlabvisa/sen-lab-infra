@@ -269,6 +269,8 @@ Connecte-toi sur **http://localhost:13050/login** avec un de ces couples identif
 ./up.sh down              # Arrête + supprime les conteneurs (préserve la BDD)
 ./up.sh nuke              # Tout effacer y compris la BDD (demande confirmation)
 ./up.sh rebuild web       # Rebuild un service après modification du code
+./up.sh seed              # Re-exécute le seed (utile si la BDD est vide après clonage)
+./up.sh users             # Liste les comptes présents dans la BDD
 ```
 
 ### Cas d'usage courants
@@ -358,6 +360,26 @@ Le mode hot-reload est plus rapide pour itérer sur le code, mais demande de gé
 ---
 
 ## Dépannage
+
+### La BDD est vide après le premier `./up.sh` (impossible de se connecter)
+
+Au premier démarrage, le `users-service` exécute un script de seed qui crée les comptes de démo (`lycee-limamou/moussa`, etc.). Ce seed peut échouer silencieusement si le `schools-service` n'a pas encore créé ses tables au moment où le seed s'exécute (race condition Docker).
+
+**Vérifie que la BDD est bien vide :**
+
+```bash
+./up.sh users
+```
+
+S'il n'y a aucune ligne, relance le seed manuellement :
+
+```bash
+./up.sh seed
+```
+
+Cette commande exécute le seed dans le conteneur `senlab-users` et `senlab-simulations`, puis affiche les comptes créés. Tu devrais maintenant pouvoir te connecter sur http://localhost:13050/login avec `lycee-limamou/moussa` / `moussa123`.
+
+> **Note** : depuis la version récente, l'entrypoint attend automatiquement que `schools_svc.schools` soit créé avant de seeder. Le problème devrait donc être résolu pour les nouveaux clonages. Si tu as cloné avant le fix, lance `./up.sh rebuild users-service` pour récupérer le nouvel entrypoint.
 
 ### "no space left on device" pendant le build
 
