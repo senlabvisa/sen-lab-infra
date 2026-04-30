@@ -1,8 +1,25 @@
 name: senlab
 
+# =====================================================================
+# Sen Lab Visa — stack complète, lancée d'une seule commande :
+#
+#   ./up.sh         (à la racine senlabvisa/)        — recommandé
+#   docker compose -f sen-lab-infra/docker/docker-compose.yml --env-file sen-lab-infra/.env up -d --build
+#
+# Ports exposés sur l'hôte :
+#   5432  → postgres
+#   3010  → gateway (utilisé par le frontend pour les appels API)
+#   13050 → web (Next.js)
+#   8080  → traefik dashboard (optionnel)
+#
+# Les services applicatifs communiquent entre eux via le réseau Docker
+# `senlab-net` (résolution DNS par nom de service).
+# =====================================================================
+
 services:
   postgres:
     image: postgres:16-alpine
+    container_name: senlab-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -20,67 +37,200 @@ services:
     ports:
       - "5432:5432"
 
+  auth-service:
+    build:
+      context: ../..
+      dockerfile: sen-lab-auth-service/Dockerfile
+    container_name: senlab-auth
+    restart: unless-stopped
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [senlab-net]
+    expose:
+      - "3001"
+
+  users-service:
+    build:
+      context: ../..
+      dockerfile: sen-lab-users-service/Dockerfile
+    container_name: senlab-users
+    restart: unless-stopped
+    environment:
+      PORT: 3002
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET}
+      SEED_ADMIN_IDENTIFIER: ${SEED_ADMIN_IDENTIFIER}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD}
+      SEED_ADMIN_FULLNAME: ${SEED_ADMIN_FULLNAME}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [senlab-net]
+    expose:
+      - "3002"
+
+  schools-service:
+    build:
+      context: ../..
+      dockerfile: sen-lab-schools-service/Dockerfile
+    container_name: senlab-schools
+    restart: unless-stopped
+    environment:
+      PORT: 3003
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=schools_svc
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [senlab-net]
+    expose:
+      - "3003"
+
+  classes-service:
+    build:
+      context: ../..
+      dockerfile: sen-lab-classes-service/Dockerfile
+    container_name: senlab-classes
+    restart: unless-stopped
+    environment:
+      PORT: 3004
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=classes_svc
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [senlab-net]
+    expose:
+      - "3004"
+
+  simulations-service:
+    build:
+      context: ../..
+      dockerfile: sen-lab-simulations-service/Dockerfile
+    container_name: senlab-simulations
+    restart: unless-stopped
+    environment:
+      PORT: 3006
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=simulations_svc
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [senlab-net]
+    expose:
+      - "3006"
+
+  attempts-service:
+    build:
+      context: ../..
+      dockerfile: sen-lab-attempts-service/Dockerfile
+    container_name: senlab-attempts
+    restart: unless-stopped
+    environment:
+      PORT: 3007
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=attempts_svc
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [senlab-net]
+    expose:
+      - "3007"
+
+  analytics-service:
+    build:
+      context: ../..
+      dockerfile: sen-lab-analytics-service/Dockerfile
+    container_name: senlab-analytics
+    restart: unless-stopped
+    environment:
+      PORT: 3008
+      JWT_SECRET: ${JWT_SECRET}
+      ATTEMPTS_SERVICE_URL: http://attempts-service:3007
+      USERS_SERVICE_URL: http://users-service:3002
+      CLASSES_SERVICE_URL: http://classes-service:3004
+      SIMULATIONS_SERVICE_URL: http://simulations-service:3006
+    depends_on:
+      - attempts-service
+      - users-service
+      - classes-service
+      - simulations-service
+    networks: [senlab-net]
+    expose:
+      - "3008"
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: sen-lab-gateway/Dockerfile
+    container_name: senlab-gateway
+    restart: unless-stopped
+    environment:
+      GATEWAY_PORT: 3010
+      JWT_SECRET: ${JWT_SECRET}
+      AUTH_SERVICE_URL: http://auth-service:3001
+      USERS_SERVICE_URL: http://users-service:3002
+      SCHOOLS_SERVICE_URL: http://schools-service:3003
+      CLASSES_SERVICE_URL: http://classes-service:3004
+      SIMULATIONS_SERVICE_URL: http://simulations-service:3006
+      ATTEMPTS_SERVICE_URL: http://attempts-service:3007
+      ANALYTICS_SERVICE_URL: http://analytics-service:3008
+    depends_on:
+      - auth-service
+      - users-service
+      - schools-service
+      - classes-service
+      - simulations-service
+      - attempts-service
+      - analytics-service
+    networks: [senlab-net]
+    ports:
+      - "3010:3010"
+
+  web:
+    build:
+      context: ../..
+      dockerfile: sen-lab-web/Dockerfile
+      args:
+        # NEXT_PUBLIC_* doit être présent au BUILD pour être bakéd dans le bundle Next.
+        # On utilise localhost:3010 car les appels partent du navigateur de l'hôte.
+        NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL}
+    container_name: senlab-web
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_GATEWAY_URL: ${NEXT_PUBLIC_GATEWAY_URL}
+      PORT: 3005
+    depends_on:
+      - gateway
+    networks: [senlab-net]
+    ports:
+      - "13050:3005"
+
   traefik:
     image: traefik:v3.1
+    container_name: senlab-traefik
     restart: unless-stopped
     command:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --entrypoints.web.address=:80
-      - --entrypoints.websecure.address=:443
       - --api.dashboard=true
       - --api.insecure=true
       - --log.level=INFO
     ports:
-      - "80:80"
-      - "443:443"
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - senlab-net
-
-  # Placeholders activés au fur et à mesure de Phase 0.
-  # Décommenter après build des images locales.
-  #
-  # auth-service:
-  #   build: ../../sen-lab-auth-service
-  #   env_file: ../.env
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   networks: [senlab-net]
-  #   labels:
-  #     - traefik.enable=true
-  #     - traefik.http.routers.auth.rule=Host(`auth.${TRAEFIK_DOMAIN}`)
-  #
-  # users-service:
-  #   build: ../../sen-lab-users-service
-  #   env_file: ../.env
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #   networks: [senlab-net]
-  #
-  # gateway:
-  #   build: ../../sen-lab-gateway
-  #   env_file: ../.env
-  #   depends_on: [auth-service, users-service]
-  #   networks: [senlab-net]
-  #   labels:
-  #     - traefik.enable=true
-  #     - traefik.http.routers.api.rule=Host(`api.${TRAEFIK_DOMAIN}`)
-  #     - traefik.http.services.api.loadbalancer.server.port=3000
-  #
-  # web:
-  #   build: ../../sen-lab-web
-  #   env_file: ../.env
-  #   depends_on: [gateway]
-  #   networks: [senlab-net]
-  #   labels:
-  #     - traefik.enable=true
-  #     - traefik.http.routers.web.rule=Host(`${TRAEFIK_DOMAIN}`)
-  #     - traefik.http.services.web.loadbalancer.server.port=3000
 
 volumes:
   pgdata:
